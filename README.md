@@ -1,6 +1,11 @@
 # Granola Meeting Data Ingestor
 
-A TypeScript application using Bun to monitor and ingest Granola meeting data into SQLite.
+[WIP] A janky TypeScript application using Bun to monitor and ingest Granola meeting data into SQLite.
+
+## TODO
+
+- [ ] Prevent the database from ballooning in size
+- [ ] Add functions to output markdown files from sql queries
 
 ## Features
 
@@ -94,4 +99,68 @@ SELECT d.title, p.name, p.email, p.role
 FROM documents d 
 JOIN people p ON d.id = p.document_id 
 WHERE d.created_at > datetime('now', '-7 days');
+
+-- Output the latest meeting to a markdown file
+.output latest_meeting.md
+WITH latest_meeting AS (
+  SELECT id, title, created_at 
+  FROM documents 
+  WHERE valid_meeting = TRUE 
+    AND deleted_at IS NULL 
+  ORDER BY created_at DESC 
+  LIMIT 1
+)
+SELECT 
+  '# ' || d.title || '\n\n' ||
+  '## Meeting Details\n' ||
+  '- **Date**: ' || datetime(d.created_at) || '\n' ||
+  CASE WHEN ce.start_time IS NOT NULL 
+    THEN '- **Duration**: ' || datetime(ce.start_time) || ' to ' || datetime(ce.end_time) || '\n' 
+    ELSE '' 
+  END ||
+  CASE WHEN ce.location IS NOT NULL 
+    THEN '- **Location**: ' || ce.location || '\n'
+    ELSE ''
+  END ||
+  CASE WHEN ce.html_link IS NOT NULL 
+    THEN '- **Calendar Link**: ' || ce.html_link || '\n'
+    ELSE ''
+  END ||
+  '\n## Participants\n' ||
+  (SELECT GROUP_CONCAT(
+    '- **' || COALESCE(p2.name, p2.email) || '**' ||
+    CASE WHEN p2.role IS NOT NULL THEN ' (' || p2.role || ')' ELSE '' END ||
+    CASE WHEN p2.response_status IS NOT NULL THEN ' - ' || p2.response_status ELSE '' END ||
+    '\n'
+  )
+  FROM (
+    SELECT DISTINCT name, email, role, response_status 
+    FROM people p2 
+    WHERE p2.document_id = d.id
+    ORDER BY 
+      CASE WHEN role = 'organizer' THEN 1 ELSE 2 END,
+      name
+  ) p2
+  ) ||
+  '\n## Notes\n\n' ||
+  COALESCE(d.notes_markdown, d.notes_plain) ||
+  '\n\n## Transcript\n\n' ||
+  COALESCE(
+    (SELECT GROUP_CONCAT(
+      '[' || datetime(t2.start_timestamp) || '] ' ||
+      CASE 
+        WHEN t2.source = 'microphone' THEN 'Me: '
+        WHEN t2.source = 'system' THEN 'Them: '
+        ELSE '??? '
+      END ||
+      t2.text || '\n'
+    )
+    FROM transcript_entries t2
+    WHERE t2.document_id = d.id
+    ORDER BY t2.start_timestamp, t2.sequence_number
+    ), '*No transcript available*')
+FROM latest_meeting lm
+JOIN documents d ON d.id = lm.id
+LEFT JOIN calendar_events ce ON ce.document_id = d.id
+GROUP BY d.id;
 ```
