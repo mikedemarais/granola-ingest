@@ -1,0 +1,20 @@
+{
+  "name": "granola-ingest",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@types/node": "^22.10.2",
+    "winston": "^3.17.0"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "debug": "DEBUG=true bun run src/index.ts"
+  }
+}
