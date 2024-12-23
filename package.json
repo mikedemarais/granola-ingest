@@ -3,7 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "devDependencies": {
-    "@types/bun": "latest"
+    "@ianvs/prettier-plugin-sort-imports": "^4.4.0",
+    "@types/bun": "latest",
+    "prettier": "^3.4.2"
   },
   "peerDependencies": {
     "typescript": "^5.0.0"

@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
-import { debug } from '../utils/logger';
 import type { Document } from '../models/types';
+import { debug } from '../utils/logger';
 
 export class DocumentService {
   private preparedStatements: {
@@ -36,7 +36,7 @@ export class DocumentService {
   upsertDocument(doc: Document) {
     debug('DocumentService', 'Upserting document', {
       id: doc.id,
-      title: doc.title
+      title: doc.title,
     });
 
     return this.preparedStatements.upsert.run(
