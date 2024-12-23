@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@types/node": "^22.10.2",
-    "winston": "^3.17.0"
+    "winston": "^3.17.0",
+    "xxhash-wasm": "^1.1.0"
   },
   "scripts": {
     "start": "bun run src/index.ts",

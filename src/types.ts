@@ -15,11 +15,12 @@ export interface Document {
   creation_source: string;
   subscription_plan_id: string | null;
   privacy_mode_enabled: boolean;
+  google_calendar_event?: CalendarEvent;
 }
 
 export interface CalendarEvent {
   id: string;
-  document_id: string;
+  document_id?: string; // Can be undefined when first created, assigned at runtime
   summary: string;
   description: string | null;
   start_time: string;
@@ -33,6 +34,7 @@ export interface CalendarEvent {
   organizer_email: string;
   created_at: string;
   updated_at: string;
+  attendees?: CalendarAttendee[];
 }
 
 export interface Person {
@@ -41,8 +43,26 @@ export interface Person {
   email: string;
   name: string | null;
   role: string | null;
-  response_status: string | null;
+  response_status: string | null | undefined;
   avatar_url: string | null;
   company_name: string | null;
   job_title: string | null;
+}
+
+export interface CalendarAttendee {
+  email: string;
+  displayName: string;
+  organizer?: boolean;
+  responseStatus?: string;
+}
+
+export interface TranscriptEntry {
+  id: string;
+  text: string;
+  source: string;
+  speaker: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  is_final: boolean;
+  sequence_number: number;
 }
