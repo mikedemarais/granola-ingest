@@ -4,8 +4,9 @@
 
 ## TODO
 
-- [ ] Prevent the database from ballooning in size
+- [x] Prevent the database from ballooning in size
 - [ ] Add functions to output markdown files from sql queries
+- [ ] Integrate with Model Context Protocol to allow Claude to consume meeting transcripts as context 
 
 ## Features
 
