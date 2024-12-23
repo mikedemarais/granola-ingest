@@ -1,0 +1,6 @@
+# Minimal Bun configuration enabling TypeScript
+[install]
+cache = true
+
+[cli]
+autoload = true
