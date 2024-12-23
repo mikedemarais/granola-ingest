@@ -1,7 +1,5 @@
-
 import { createLogger, format, transports } from 'winston';
 
-// Enable debug logging based on environment variable
 const isDebug = process.env.DEBUG === 'true';
 
 export const logger = createLogger({
@@ -18,15 +16,11 @@ export const logger = createLogger({
     new transports.File({ filename: 'logs/error.log', level: 'error' }),
     new transports.File({ filename: 'logs/combined.log' }),
     new transports.Console({
-      format: format.combine(
-        format.colorize(),
-        format.simple()
-      )
+      format: format.combine(format.colorize(), format.simple())
     })
   ]
 });
 
-// Helper for debug logs
 export function debug(context: string, message: string, data?: any) {
   if (isDebug) {
     logger.debug(message, { context, ...data });

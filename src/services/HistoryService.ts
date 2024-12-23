@@ -1,9 +1,10 @@
 import { Database } from 'bun:sqlite';
-import { debug, logger } from './utils/logger';
-import { HashUtil } from './utils/hash';
-import type { Document } from './types';
+import { logger, debug } from '../utils/logger';
+import { HashUtil } from '../utils/hashing';
+import type { Document } from '../models/types';
+import * as crypto from 'crypto';
 
-export class HistoryTracker {
+export class HistoryService {
   private preparedStatements: {
     insertHistory?: any;
     getLatestHash?: any;
@@ -18,7 +19,8 @@ export class HistoryTracker {
 
   private initializeHistoryTables() {
     const schemas = [
-      `CREATE TABLE IF NOT EXISTS historical_documents (
+      `
+      CREATE TABLE IF NOT EXISTS historical_documents (
         id UUID,
         document_id UUID,
         title TEXT,
@@ -38,31 +40,30 @@ export class HistoryTracker {
         privacy_mode_enabled BOOLEAN,
         history_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id, history_timestamp)
-      )`,
-      
-      `CREATE INDEX IF NOT EXISTS idx_historical_documents_document_id 
-       ON historical_documents(document_id)`,
-      
-      `CREATE TABLE IF NOT EXISTS document_state_hashes (
+      );
+      `,
+      `
+      CREATE INDEX IF NOT EXISTS idx_historical_documents_document_id
+        ON historical_documents(document_id);
+      `,
+      `
+      CREATE TABLE IF NOT EXISTS document_state_hashes (
         document_id UUID PRIMARY KEY,
         content_hash TEXT NOT NULL,
         last_change TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         changed_fields TEXT,
         FOREIGN KEY (document_id) REFERENCES documents(id)
-      )`,
-      
-      `CREATE INDEX IF NOT EXISTS idx_document_state_hashes_hash 
-       ON document_state_hashes(content_hash)`
+      );
+      `,
+      `
+      CREATE INDEX IF NOT EXISTS idx_document_state_hashes_hash
+        ON document_state_hashes(content_hash);
+      `
     ];
 
     this.db.transaction(() => {
       for (const schema of schemas) {
-        try {
-          this.db.run(schema);
-        } catch (error) {
-          logger.error('Error creating history tables:', error);
-          throw error;
-        }
+        this.db.run(schema);
       }
     })();
 
@@ -83,21 +84,23 @@ export class HistoryTracker {
 
       this.preparedStatements.getLatestHash = this.db.prepare(`
         SELECT content_hash, changed_fields
-        FROM document_state_hashes 
+        FROM document_state_hashes
         WHERE document_id = ?
       `);
 
       this.preparedStatements.updateHash = this.db.prepare(`
         INSERT INTO document_state_hashes (document_id, content_hash, changed_fields)
         VALUES (?, ?, ?)
-        ON CONFLICT (document_id) DO UPDATE SET 
+        ON CONFLICT (document_id) DO UPDATE SET
           content_hash = excluded.content_hash,
           changed_fields = excluded.changed_fields,
           last_change = CURRENT_TIMESTAMP
       `);
 
       this.preparedStatements.getDocument = this.db.prepare(`
-        SELECT * FROM documents WHERE id = ?
+        SELECT *
+        FROM documents
+        WHERE id = ?
       `);
     } catch (error) {
       logger.error('Error preparing statements:', error);
@@ -106,10 +109,6 @@ export class HistoryTracker {
   }
 
   private async getDocumentHash(doc: Document): Promise<string> {
-    if (!doc) {
-      throw new Error('Invalid document provided to getDocumentHash');
-    }
-
     const hashInput = [
       doc.title || '',
       doc.notes_markdown || '',
@@ -125,33 +124,6 @@ export class HistoryTracker {
     return HashUtil.getHash(hashInput);
   }
 
-  private async detectChangedFields(doc: Document, lastHash: string | null): Promise<string[]> {
-    if (!lastHash) {
-      return ['initial_creation'];
-    }
-
-    const currentHash = await this.getDocumentHash(doc);
-    if (lastHash === currentHash) {
-      return [];
-    }
-
-    const lastDoc = this.getDocumentFromId(doc.id);
-    if (!lastDoc) {
-      return ['data_changed'];
-    }
-
-    const fieldsToCheck = [
-      'title', 'notes_markdown', 'notes_plain', 'updated_at', 
-      'deleted_at', 'public', 'valid_meeting', 
-      'has_shareable_link', 'privacy_mode_enabled'
-    ] as const;
-
-    return fieldsToCheck.filter(field => 
-      doc[field] !== lastDoc[field] && 
-      (doc[field] !== null || lastDoc[field] !== null)
-    );
-  }
-
   private getDocumentFromId(documentId: string): Document | null {
     try {
       return this.preparedStatements.getDocument.get(documentId) as Document | null;
@@ -159,6 +131,37 @@ export class HistoryTracker {
       logger.error('Error fetching document:', error);
       return null;
     }
+  }
+
+  private async detectChangedFields(doc: Document, lastHash: string | null): Promise<string[]> {
+    if (!lastHash) {
+      return ['initial_creation'];
+    }
+    const currentHash = await this.getDocumentHash(doc);
+    if (lastHash === currentHash) {
+      return [];
+    }
+    const lastDoc = this.getDocumentFromId(doc.id);
+    if (!lastDoc) {
+      return ['data_changed'];
+    }
+    const fieldsToCheck = [
+      'title',
+      'notes_markdown',
+      'notes_plain',
+      'updated_at',
+      'deleted_at',
+      'public',
+      'valid_meeting',
+      'has_shareable_link',
+      'privacy_mode_enabled'
+    ] as const;
+
+    return fieldsToCheck.filter(
+      field =>
+        doc[field] !== lastDoc[field] &&
+        (doc[field] !== null || lastDoc[field] !== null)
+    );
   }
 
   async trackDocumentHistory(doc: Document): Promise<boolean> {
@@ -169,9 +172,9 @@ export class HistoryTracker {
 
     try {
       const result = this.preparedStatements.getLatestHash.get(doc.id);
-      const lastHash = result?.content_hash;
+      const lastHash = result?.content_hash || null;
       const changedFields = await this.detectChangedFields(doc, lastHash);
-      
+
       if (changedFields.length === 0) {
         debug('history-tracker', 'No changes detected, skipping history entry', {
           documentId: doc.id,
@@ -215,7 +218,6 @@ export class HistoryTracker {
         title: doc.title,
         changedFields
       });
-      
       return true;
     } catch (error) {
       logger.error('Error tracking document history:', error);
@@ -229,11 +231,13 @@ export class HistoryTracker {
     }
 
     try {
-      return this.db.prepare(`
-        SELECT * FROM historical_documents
+      const stmt = this.db.prepare(`
+        SELECT *
+        FROM historical_documents
         WHERE document_id = ?
         ORDER BY history_timestamp DESC
-      `).all(documentId);
+      `);
+      return stmt.all(documentId);
     } catch (error) {
       logger.error('Error fetching document history:', error);
       throw error;

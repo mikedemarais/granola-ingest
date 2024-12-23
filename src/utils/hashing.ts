@@ -23,18 +23,8 @@ export class HashUtil {
   }
 
   static async getDocumentHash(doc: any): Promise<string> {
-    const hashInput = [
-      doc.title || '',
-      doc.notes_markdown || '',
-      doc.notes_plain || '',
-      doc.updated_at || '',
-      doc.deleted_at || '',
-      doc.public ? '1' : '0',
-      doc.valid_meeting ? '1' : '0',
-      doc.has_shareable_link ? '1' : '0',
-      doc.privacy_mode_enabled ? '1' : '0'
-    ].join('|');
-
-    return this.getHash(hashInput);
+    // Example specialized hashing if needed
+    const data = JSON.stringify(doc);
+    return this.getHash(data);
   }
 }
