@@ -1,83 +1,60 @@
+import * as crypto from 'crypto';
 import { watch } from 'fs';
 import { join } from 'path';
-import { logger, debug } from './utils/logger';
 import { DatabaseConnection } from './database/connection';
-import { HistoryService } from './services/HistoryService';
-import { DocumentService } from './services/DocumentService';
+import type { Document, Person, TranscriptEntry } from './models/types';
 import { CalendarService } from './services/CalendarService';
-import { TranscriptService } from './services/TranscriptService';
+import { DocumentService } from './services/DocumentService';
+import { HistoryService } from './services/HistoryService';
 import { PersonService } from './services/PersonService';
-import { TemplateService } from './services/TemplateService';
 import { StateTrackingService } from './services/StateTrackingService';
-import type { Document, CalendarEvent, Person, TranscriptEntry } from './models/types';
-import * as crypto from 'crypto';
+import {
+  TemplateService,
+  type DocumentPanel,
+  type PanelTemplate,
+  type TemplateSection,
+} from './services/TemplateService';
+import { TranscriptService } from './services/TranscriptService';
+import { debug, logger } from './utils/logger';
 
 class MeetingDataIngestor {
   private static readonly CHUNK_SIZE = 100;
   private dbPath: string;
   private cachePath: string;
+  private watcher: ReturnType<typeof watch> | null = null;
 
-  private historyService: HistoryService;
-  private documentService: DocumentService;
-  private calendarService: CalendarService;
-  private transcriptService: TranscriptService;
-  private personService: PersonService;
-  private templateService: TemplateService;
-  private stateTrackingService: StateTrackingService;
+  private historyService!: HistoryService;
+  private documentService!: DocumentService;
+  private calendarService!: CalendarService;
+  private transcriptService!: TranscriptService;
+  private personService!: PersonService;
+  private templateService!: TemplateService;
+  private readonly stateTrackingService: StateTrackingService;
 
   constructor(dbPath: string, cachePath: string) {
     this.dbPath = dbPath;
     this.cachePath = cachePath;
-
-    const db = DatabaseConnection.getInstance(dbPath);
-    this.historyService = new HistoryService(db);
-    this.documentService = new DocumentService(db);
-    this.calendarService = new CalendarService(db);
-    this.transcriptService = new TranscriptService(db);
-    this.personService = new PersonService(db);
-    this.templateService = new TemplateService(db);
     this.stateTrackingService = new StateTrackingService();
   }
 
-  public async startMonitoring() {
-    logger.info(`Starting to monitor cache file at ${this.cachePath}`);
-    debug('monitor', 'Starting file monitor', {
-      cachePath: this.cachePath,
-      dbPath: this.dbPath
-    });
-
+  private async initializeServices(): Promise<void> {
     try {
-      const data = await this.readAndParseCache();
-      await this.processCache(data);
-      logger.info('Initial cache processing complete');
+      // Get database instance - this ensures schemas are initialized
+      const db = await DatabaseConnection.getInstance(this.dbPath);
+
+      // Initialize services
+      this.historyService = new HistoryService(db);
+      this.documentService = new DocumentService(db);
+      this.calendarService = new CalendarService(db);
+      this.transcriptService = new TranscriptService(db);
+      this.personService = new PersonService(db);
+      this.templateService = new TemplateService(db);
+
+      logger.info('All services initialized successfully');
     } catch (error) {
-      logger.error('Error during initial cache processing:', error);
+      logger.error('Service initialization failed:', error);
+      throw new Error(`Failed to initialize services: ${(error as Error).message}`);
     }
-
-    const watcher = watch(this.cachePath, async (eventType) => {
-      if (eventType === 'change') {
-        logger.info('Cache file changed, processing updates...');
-        debug('file-change', 'Cache file modified', {
-          eventType,
-          file: this.cachePath
-        });
-
-        try {
-          const data = await this.readAndParseCache();
-          await this.processCache(data);
-          logger.info('Cache update processing complete');
-        } catch (error) {
-          logger.error('Error processing cache update:', error);
-        }
-      }
-    });
-
-    process.on('SIGINT', () => {
-      logger.info('Shutting down...');
-      watcher.close();
-      // Close DB if needed: DatabaseConnection.getInstance(...) has no explicit close
-      process.exit(0);
-    });
   }
 
   private async readAndParseCache(): Promise<any> {
@@ -85,17 +62,26 @@ class MeetingDataIngestor {
       debug('cache-reader', 'Reading cache file', { path: this.cachePath });
       const cacheContent = await Bun.file(this.cachePath).text();
 
-      debug('cache-content', 'Parsed cache content', {
+      if (!cacheContent) {
+        throw new Error('Cache file is empty');
+      }
+
+      debug('cache-content', 'Read cache content', {
         bytesRead: cacheContent.length,
-        preview: cacheContent.slice(0, 100)
+        preview: cacheContent.slice(0, 100),
       });
 
-      // The original code had a double JSON.parse approach.
       const parsedCache = JSON.parse(cacheContent);
-      const innerCache = JSON.parse(parsedCache.cache);
+      if (!parsedCache.cache) {
+        throw new Error('Invalid cache format - missing cache property');
+      }
 
+      const innerCache = JSON.parse(parsedCache.cache);
       debug('parsed-cache', 'Cache structure analysis', {
-        hasState: !!innerCache.state
+        hasState: !!innerCache.state,
+        documentCount: innerCache.state?.documents
+          ? Object.keys(innerCache.state.documents).length
+          : 0,
       });
 
       return innerCache;
@@ -105,121 +91,210 @@ class MeetingDataIngestor {
     }
   }
 
-  private async processCache(data: any) {
+  private async processCache(data: any): Promise<void> {
     if (!data?.state?.documents) {
       logger.error('Invalid cache data structure:', {
         hasState: !!data?.state,
         stateType: typeof data?.state,
-        hasDocuments: !!data?.state?.documents
+        hasDocuments: !!data?.state?.documents,
       });
       throw new Error('Invalid cache data structure - missing state.documents');
     }
 
-    let documents: Document[] = [];
-    if (Array.isArray(data.state.documents)) {
-      documents = data.state.documents;
-    } else {
-      documents = Object.values(data.state.documents);
-    }
+    const documents: Document[] = Array.isArray(data.state.documents)
+      ? data.state.documents
+      : Object.values(data.state.documents);
 
     logger.info(`Processing ${documents.length} documents`);
 
     for (let i = 0; i < documents.length; i += MeetingDataIngestor.CHUNK_SIZE) {
       const chunk = documents.slice(i, i + MeetingDataIngestor.CHUNK_SIZE);
       await this.processChunk(chunk, data);
+      logger.info(
+        `Processed chunk ${Math.floor(i / MeetingDataIngestor.CHUNK_SIZE) + 1} of ${Math.ceil(documents.length / MeetingDataIngestor.CHUNK_SIZE)}`
+      );
     }
-
-    logger.info('Cache processing complete');
   }
 
-  private async processChunk(chunk: Document[], data: any) {
-    // We handle everything inside a DB transaction
-    const db = DatabaseConnection.getInstance(this.dbPath);
-    db.transaction(() => {
-      for (const doc of chunk) {
-        (async () => {
-          // Document changes
-          if (await this.stateTrackingService.hasDocumentChanged(doc)) {
-            this.historyService.trackDocumentHistory(doc);
-            this.documentService.upsertDocument(doc);
-          }
+  private async processChunk(chunk: Document[], data: any): Promise<void> {
+    try {
+      const db = await DatabaseConnection.getInstance(this.dbPath);
 
-          // Calendar event changes
-          if (doc.google_calendar_event) {
-            const eventObj = doc.google_calendar_event;
-            eventObj.document_id = doc.id; // Ensure docId is set
-            if (await this.stateTrackingService.hasCalendarEventChanged(doc.id, eventObj)) {
-              this.calendarService.upsertCalendarEvent(eventObj);
+      await db.transaction(() => {
+        return Promise.all(
+          chunk.map(async (doc) => {
+            try {
+              // Document changes
+              if (await this.stateTrackingService.hasDocumentChanged(doc)) {
+                await this.historyService.trackDocumentHistory(doc);
+                await this.documentService.upsertDocument(doc);
+              }
 
-              if (eventObj.attendees) {
-                for (const attendee of eventObj.attendees) {
-                  const person = {
-                    id: crypto.randomUUID(),
-                    document_id: doc.id,
-                    email: attendee.email,
-                    name: attendee.displayName,
-                    role: attendee.organizer ? 'organizer' : 'attendee',
-                    response_status: attendee.responseStatus,
-                    avatar_url: null,
-                    company_name: null,
-                    job_title: null
-                  };
-                  if (await this.stateTrackingService.hasPersonChanged(doc.id, person)) {
-                    this.personService.upsertPerson(person);
+              // Calendar event changes
+              if (doc.google_calendar_event) {
+                const eventObj = doc.google_calendar_event;
+                eventObj.document_id = doc.id;
+                if (await this.stateTrackingService.hasCalendarEventChanged(doc.id, eventObj)) {
+                  await this.calendarService.upsertCalendarEvent(eventObj);
+
+                  if (eventObj.attendees) {
+                    await Promise.all(
+                      eventObj.attendees.map(async (attendee) => {
+                        const person: Person = {
+                          id: crypto.randomUUID(),
+                          document_id: doc.id,
+                          email: attendee.email,
+                          name: attendee.displayName || null,
+                          role: attendee.organizer ? 'organizer' : 'attendee',
+                          response_status: attendee.responseStatus || null,
+                          avatar_url: null,
+                          company_name: null,
+                          job_title: null,
+                        };
+                        if (await this.stateTrackingService.hasPersonChanged(doc.id, person)) {
+                          await this.personService.upsertPerson(person);
+                        }
+                      })
+                    );
                   }
                 }
               }
-            }
-          }
 
-          // Transcript changes
-          if (data.state.transcripts?.[doc.id]) {
-            const entries: TranscriptEntry[] = data.state.transcripts[doc.id];
-            for (const entry of entries) {
-              if (await this.stateTrackingService.hasTranscriptChanged(doc.id, entry)) {
-                this.transcriptService.upsertTranscriptEntry(doc.id, entry);
+              // Transcript changes
+              if (data.state.transcripts?.[doc.id]) {
+                const entries: TranscriptEntry[] = data.state.transcripts[doc.id];
+                await Promise.all(
+                  entries.map(async (entry) => {
+                    if (await this.stateTrackingService.hasTranscriptChanged(doc.id, entry)) {
+                      await this.transcriptService.upsertTranscriptEntry(doc.id, entry);
+                    }
+                  })
+                );
               }
-            }
-          }
 
-          // (If the cache has templates or similar data, upsert them here)
-          if (data.state.templates?.[doc.id]) {
-            const templateRecords = data.state.templates[doc.id];
-            // Example structure depends on your actual data shape
-            if (templateRecords.panel_templates) {
-              for (const panelTemplate of templateRecords.panel_templates) {
-                this.templateService.upsertPanelTemplate(panelTemplate);
+              // Template changes
+              if (data.state.templates?.[doc.id]) {
+                const templateRecords = data.state.templates[doc.id];
+
+                if (templateRecords.panel_templates) {
+                  await Promise.all(
+                    templateRecords.panel_templates.map((template: PanelTemplate) =>
+                      this.templateService.upsertPanelTemplate(template)
+                    )
+                  );
+                }
+
+                if (templateRecords.template_sections) {
+                  await Promise.all(
+                    templateRecords.template_sections.map((section: TemplateSection) =>
+                      this.templateService.upsertTemplateSection(section)
+                    )
+                  );
+                }
+
+                if (templateRecords.document_panels) {
+                  await Promise.all(
+                    templateRecords.document_panels.map((panel: DocumentPanel) => {
+                      panel.document_id = doc.id;
+                      return this.templateService.upsertDocumentPanel(panel);
+                    })
+                  );
+                }
               }
+            } catch (error) {
+              logger.error(`Error processing document ${doc.id}:`, error);
+              throw error;
             }
-            if (templateRecords.template_sections) {
-              for (const section of templateRecords.template_sections) {
-                this.templateService.upsertTemplateSection(section);
-              }
-            }
-            if (templateRecords.document_panels) {
-              for (const panel of templateRecords.document_panels) {
-                // Make sure doc ID is set if needed
-                panel.document_id = doc.id;
-                this.templateService.upsertDocumentPanel(panel);
-              }
-            }
+          })
+        );
+      })();
+    } catch (error) {
+      logger.error('Error in processChunk:', error);
+      throw error;
+    }
+  }
+
+  private setupCleanup(): void {
+    const cleanup = async () => {
+      await this.cleanup();
+      process.exit(0);
+    };
+
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
+    process.on('uncaughtException', async (error) => {
+      logger.error('Uncaught exception:', error);
+      await this.cleanup();
+      process.exit(1);
+    });
+  }
+
+  private async cleanup(): Promise<void> {
+    logger.info('Cleaning up...');
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+    DatabaseConnection.closeConnection();
+  }
+
+  public async startMonitoring(): Promise<void> {
+    try {
+      logger.info(`Starting to monitor cache file at ${this.cachePath}`);
+      debug('monitor', 'Starting file monitor', {
+        cachePath: this.cachePath,
+        dbPath: this.dbPath,
+      });
+
+      // Initialize services
+      await this.initializeServices();
+
+      // Process initial cache
+      const data = await this.readAndParseCache();
+      await this.processCache(data);
+      logger.info('Initial cache processing complete');
+
+      // Set up file watcher
+      this.watcher = watch(this.cachePath, async (eventType) => {
+        if (eventType === 'change') {
+          logger.info('Cache file changed, processing updates...');
+          try {
+            const data = await this.readAndParseCache();
+            await this.processCache(data);
+            logger.info('Cache update processing complete');
+          } catch (error) {
+            logger.error('Error processing cache update:', error);
           }
-        })().catch(err => logger.error('Error processing doc in chunk:', err));
-      }
-    })();
+        }
+      });
+
+      // Set up cleanup handlers
+      this.setupCleanup();
+    } catch (error) {
+      logger.error('Fatal error in startMonitoring:', error);
+      await this.cleanup();
+      throw error;
+    }
   }
 }
 
+export { MeetingDataIngestor };
+
 // Entry point
 const HOME = process.env.HOME || process.env.USERPROFILE || '';
-const CACHE_FILE_PATH = join(HOME, 'Library', 'Application Support', 'Granola', 'cache-v3.json');
+if (!HOME) {
+  logger.error('Unable to determine home directory');
+  process.exit(1);
+}
 
+const CACHE_FILE_PATH = join(HOME, 'Library', 'Application Support', 'Granola', 'cache-v3.json');
 if (!process.env.DB_PATH) {
-  throw new Error('DB_PATH environment variable is required');
+  logger.error('DB_PATH environment variable is required');
+  process.exit(1);
 }
 
 const ingestor = new MeetingDataIngestor(process.env.DB_PATH, CACHE_FILE_PATH);
-ingestor.startMonitoring().catch(error => {
+ingestor.startMonitoring().catch((error) => {
   logger.error('Fatal error:', error);
   process.exit(1);
 });

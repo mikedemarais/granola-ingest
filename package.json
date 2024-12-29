@@ -20,6 +20,9 @@
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",
     "debug": "DEBUG=true bun run src/index.ts",
-    "start-mcp": "bun run src/mcp/mcp_sqlite_server.ts"
+    "start-mcp": "bun run src/mcp/mcp_sqlite_server.ts",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "test:coverage": "bun test --coverage"
   }
 }
